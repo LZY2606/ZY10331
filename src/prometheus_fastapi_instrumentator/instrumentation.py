@@ -46,6 +46,7 @@ class PrometheusFastApiInstrumentator:
         should_exclude_streaming_duration: bool = False,
         excluded_handlers: List[str] = [],
         body_handlers: List[str] = [],
+        body_max_size: Optional[int] = None,
         round_latency_decimals: int = 4,
         env_var_name: str = "ENABLE_METRICS",
         inprogress_name: str = "http_requests_inprogress",
@@ -99,6 +100,11 @@ class PrometheusFastApiInstrumentator:
                 Note that this has a noticeable negative impact on performance
                 with responses larger than a few MBs. Defaults to `[]`.
 
+            body_max_size (Optional[int]): Maximum number of response body
+                bytes buffered for instrumentations. Bodies larger than this
+                are truncated and flagged via `info.response_body_truncated`.
+                `None` means unlimited. Defaults to `None`.
+
             round_latency_decimals (int): Number of decimals latencies should be
                 rounded to. Ignored unless `should_round_latency_decimals` is
                 `True`. Defaults to `4`.
@@ -141,6 +147,7 @@ class PrometheusFastApiInstrumentator:
 
         self.excluded_handlers = [re.compile(path) for path in excluded_handlers]
         self.body_handlers = [re.compile(path) for path in body_handlers]
+        self.body_max_size = body_max_size
 
         self.instrumentations: List[Callable[[metrics.Info], None]] = []
         self.async_instrumentations: List[Callable[[metrics.Info], Awaitable[None]]] = []
@@ -236,6 +243,7 @@ class PrometheusFastApiInstrumentator:
             async_instrumentations=self.async_instrumentations,
             excluded_handlers=self.excluded_handlers,  # type: ignore
             body_handlers=self.body_handlers,  # type: ignore
+            body_max_size=self.body_max_size,
             metric_namespace=metric_namespace,
             metric_subsystem=metric_subsystem,
             should_only_respect_2xx_for_highr=should_only_respect_2xx_for_highr,

@@ -28,6 +28,7 @@ class Info:
         modified_status: str,
         modified_duration: float,
         modified_duration_without_streaming: float = 0.0,
+        response_body_truncated: bool = False,
     ):
         """Creates Info object that is used for instrumentation functions.
 
@@ -45,6 +46,9 @@ class Info:
                 by instrumentator. For example rounding of decimals. Seconds.
             modified_duration_without_streaming (float): Latency between request arrival and response starts (i.e. first chunk duration).
                 Excluding the streaming duration. Defaults to 0.
+            response_body_truncated (bool): Marker that tells if the collected
+                response body was truncated because it exceeded the configured
+                body size limit. Defaults to `False`.
         """
 
         self.request = request
@@ -54,6 +58,7 @@ class Info:
         self.modified_status = modified_status
         self.modified_duration = modified_duration
         self.modified_duration_without_streaming = modified_duration_without_streaming
+        self.response_body_truncated = response_body_truncated
 
 
 def _build_label_attribute_names(

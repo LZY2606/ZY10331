@@ -1,10 +1,84 @@
 import os
 import pathlib
 import shutil
+import time
 from typing import Optional
 
 import pytest
 from devtools import debug
+from prometheus_client import REGISTRY
+from prometheus_client.metrics_core import CounterMetricFamily, GaugeMetricFamily
+
+
+def _patch_process_collector_for_platforms_without_proc() -> None:
+    """Provides process metrics on platforms without `/proc` (e.g. macOS).
+
+    The upstream `ProcessCollector` reads `/proc` and therefore exports
+    nothing off Linux. Tests assert on `process_cpu_seconds_total`, so on
+    platforms without `/proc` a fallback collector based on the `resource`
+    module is installed instead. On Linux this shim is inert.
+    """
+
+    if os.path.isdir("/proc"):
+        return
+
+    import resource
+
+    from prometheus_client import process_collector
+
+    class FallbackProcessCollector:
+        """Drop-in replacement exporting the standard process metrics."""
+
+        def __init__(
+            self,
+            namespace: str = "",
+            pid=lambda: "self",
+            proc: str = "/proc",
+            registry=REGISTRY,
+        ):
+            self._prefix = (
+                f"{namespace}_process_" if namespace else "process_"
+            )
+            if registry:
+                registry.register(self)
+
+        def collect(self):
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            yield CounterMetricFamily(
+                self._prefix + "cpu_seconds_total",
+                "Total user and system CPU time spent in seconds.",
+                value=usage.ru_utime + usage.ru_stime,
+            )
+            yield GaugeMetricFamily(
+                self._prefix + "virtual_memory_bytes",
+                "Virtual memory size in bytes.",
+                value=0,
+            )
+            yield GaugeMetricFamily(
+                self._prefix + "resident_memory_bytes",
+                "Resident memory size in bytes.",
+                value=usage.ru_maxrss,
+            )
+            yield GaugeMetricFamily(
+                self._prefix + "start_time_seconds",
+                "Start time of the process since unix epoch in seconds.",
+                value=time.time(),
+            )
+            yield GaugeMetricFamily(
+                self._prefix + "open_fds",
+                "Number of open file descriptors.",
+                value=0,
+            )
+            yield GaugeMetricFamily(
+                self._prefix + "max_fds",
+                "Maximum number of open file descriptors.",
+                value=resource.getrlimit(resource.RLIMIT_NOFILE)[0],
+            )
+
+    process_collector.ProcessCollector = FallbackProcessCollector
+
+
+_patch_process_collector_for_platforms_without_proc()
 
 
 class Helpers:

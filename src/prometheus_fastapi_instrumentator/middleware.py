@@ -1,22 +1,28 @@
 from __future__ import annotations
 
-import asyncio
 import re
-from http import HTTPStatus
-from timeit import default_timer
 from typing import Awaitable, Callable, Optional, Sequence, Tuple, Union
 
 from prometheus_client import REGISTRY, CollectorRegistry, Gauge
-from starlette.datastructures import Headers
 from starlette.requests import Request
-from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from prometheus_fastapi_instrumentator import metrics, routing
+from prometheus_fastapi_instrumentator import metrics
+from prometheus_fastapi_instrumentator.plan import (
+    ExclusionMatcher,
+    InstrumentationPlan,
+    RequestExecution,
+)
 
 
 class PrometheusInstrumentatorMiddleware:
-    """ASGI middleware that records Prometheus metrics for HTTP requests."""
+    """ASGI middleware that records Prometheus metrics for HTTP requests.
+
+    Installation builds a single immutable `InstrumentationPlan` that is
+    reused by all requests. Each request gets its own `RequestExecution`
+    state machine that is advanced through the phases `start`,
+    `response-start`, `body-chunk`, `finish` and `error`.
+    """
 
     def __init__(
         self,
@@ -32,6 +38,7 @@ class PrometheusInstrumentatorMiddleware:
         should_exclude_streaming_duration: bool = False,
         excluded_handlers: Sequence[str] = (),
         body_handlers: Sequence[str] = (),
+        body_max_size: Optional[int] = None,
         round_latency_decimals: int = 4,
         env_var_name: str = "ENABLE_METRICS",
         inprogress_name: str = "http_requests_inprogress",
@@ -87,6 +94,7 @@ class PrometheusInstrumentatorMiddleware:
 
         self.excluded_handlers = [re.compile(path) for path in excluded_handlers]
         self.body_handlers = [re.compile(path) for path in body_handlers]
+        self.body_max_size = body_max_size
 
         if instrumentations:
             self.instrumentations = instrumentations
@@ -125,110 +133,44 @@ class PrometheusInstrumentatorMiddleware:
                 multiprocess_mode="livesum",
             )
 
+        # Immutable install-time plan. Shared by all requests of this
+        # middleware instance, safe for concurrent reuse, and never mutated
+        # by per-request execution state.
+        self.plan = InstrumentationPlan(
+            instrumentations=tuple(self.instrumentations),
+            async_instrumentations=tuple(self.async_instrumentations),
+            exclusion=ExclusionMatcher(
+                should_ignore_untemplated=self.should_ignore_untemplated,
+                patterns=tuple(self.excluded_handlers),
+            ),
+            body_handlers=tuple(self.body_handlers),
+            body_max_size=self.body_max_size,
+            should_group_status_codes=self.should_group_status_codes,
+            should_group_untemplated=self.should_group_untemplated,
+            should_include_root_path=self.should_include_root_path,
+            should_round_latency_decimals=self.should_round_latency_decimals,
+            round_latency_decimals=self.round_latency_decimals,
+            inprogress=self.inprogress,
+            inprogress_labels=self.inprogress_labels,
+        )
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
 
-        request = Request(scope)
-        start_time = default_timer()
+        execution = RequestExecution(plan=self.plan, request=Request(scope))
 
-        handler, is_templated = self._get_handler(request)
-        is_excluded = self._is_handler_excluded(handler, is_templated)
-        handler = (
-            "none" if not is_templated and self.should_group_untemplated else handler
-        )
-
-        if not is_excluded and self.inprogress:
-            if self.inprogress_labels:
-                inprogress = self.inprogress.labels(request.method, handler)
-            else:
-                inprogress = self.inprogress
-            inprogress.inc()
-
-        status_code = 500
-        headers = []
-        body = b""
-        response_start_time = None
-
-        # Message body collected for handlers matching body_handlers patterns.
-        if any(pattern.search(handler) for pattern in self.body_handlers):
-
-            async def send_wrapper(message: Message) -> None:
-                if message["type"] == "http.response.start":
-                    nonlocal status_code, headers, response_start_time
-                    headers = message["headers"]
-                    status_code = message["status"]
-                    response_start_time = default_timer()
-                elif message["type"] == "http.response.body" and message["body"]:
-                    nonlocal body
-                    body += message["body"]
-                await send(message)
-
-        else:
-
-            async def send_wrapper(message: Message) -> None:
-                if message["type"] == "http.response.start":
-                    nonlocal status_code, headers, response_start_time
-                    headers = message["headers"]
-                    status_code = message["status"]
-                    response_start_time = default_timer()
-                await send(message)
+        async def send_wrapper(message: Message) -> None:
+            execution.observe(message)
+            await send(message)
 
         try:
             await self.app(scope, receive, send_wrapper)
         except Exception as exc:
+            execution.error()
             raise exc
         finally:
-            status = (
-                str(status_code.value)
-                if isinstance(status_code, HTTPStatus)
-                else str(status_code)
-            )
-
-            if not is_excluded:
-                duration = max(default_timer() - start_time, 0.0)
-                duration_without_streaming = 0.0
-
-                if response_start_time:
-                    duration_without_streaming = max(
-                        response_start_time - start_time, 0.0
-                    )
-
-                if self.should_instrument_requests_inprogress:
-                    inprogress.dec()
-
-                if self.should_round_latency_decimals:
-                    duration = round(duration, self.round_latency_decimals)
-                    duration_without_streaming = round(
-                        duration_without_streaming, self.round_latency_decimals
-                    )
-
-                if self.should_group_status_codes:
-                    status = status[0] + "xx"
-
-                response = Response(
-                    content=body, headers=Headers(raw=headers), status_code=status_code
-                )
-
-                info = metrics.Info(
-                    request=request,
-                    response=response,
-                    method=request.method,
-                    modified_handler=handler,
-                    modified_status=status,
-                    modified_duration=duration,
-                    modified_duration_without_streaming=duration_without_streaming,
-                )
-
-                for instrumentation in self.instrumentations:
-                    instrumentation(info)
-
-                await asyncio.gather(
-                    *[
-                        instrumentation(info)
-                        for instrumentation in self.async_instrumentations
-                    ]
-                )
+            await execution.finish()
 
     def _get_handler(self, request: Request) -> Tuple[str, bool]:
         """Extracts either template or (if no template) path.
@@ -242,10 +184,7 @@ class PrometheusInstrumentatorMiddleware:
                 if the path is templated or not. When configured, the template
                 includes the application's effective `root_path`.
         """
-        route_name = routing.get_route_name(
-            request, should_include_root_path=self.should_include_root_path
-        )
-        return route_name or request.url.path, True if route_name else False
+        return self.plan.resolve_handler(request)
 
     def _is_handler_excluded(self, handler: str, is_templated: bool) -> bool:
         """Determines if the handler should be ignored.
@@ -257,11 +196,4 @@ class PrometheusInstrumentatorMiddleware:
         Returns:
             bool: `True` if excluded, `False` if not.
         """
-
-        if not is_templated and self.should_ignore_untemplated:
-            return True
-
-        if any(pattern.search(handler) for pattern in self.excluded_handlers):
-            return True
-
-        return False
+        return self.plan.exclusion.is_excluded(handler, is_templated)
