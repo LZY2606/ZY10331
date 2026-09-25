@@ -7,7 +7,28 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0).
 
 ## Unreleased
 
-Nothing.
+### Changed
+
+- Refactored the instrumentation internals into an immutable install-time
+  `InstrumentationPlan` (new module
+  `prometheus_fastapi_instrumentator.plan`) and a per-request
+  `RequestExecutionState`. The plan fixes the metric callbacks, the
+  request/response body requirements, the label options, the exclusion
+  matcher and the registry, and can be shared across concurrent requests and
+  middleware instances. The middleware now only creates a request state and
+  advances it through the `start`, `response-start`, `body-chunk`, `finish`
+  and `error` phases. Response bodies are only buffered when a configured
+  `body_handlers` pattern actually matches, and the public `Instrumentator`
+  API, metric callable signatures, exception propagation, gzip exposition
+  and the in-progress gauge remain unchanged.
+
+### Added
+
+- Added new optional parameter `body_max_bytes` to the `Instrumentator`
+  constructor and the middleware. When set, response bodies collected for
+  handlers matching `body_handlers` are capped at the configured number of
+  bytes and further chunks are dropped (marked as truncated). Defaults to
+  `None` (no limit) to maintain backwards compatibility.
 
 ## [8.1.0](https://github.com/trallnag/prometheus-fastapi-instrumentator/compare/v8.0.2...v8.1.0) / 2026-07-26
 

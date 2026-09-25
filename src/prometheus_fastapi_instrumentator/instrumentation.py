@@ -46,6 +46,7 @@ class PrometheusFastApiInstrumentator:
         should_exclude_streaming_duration: bool = False,
         excluded_handlers: List[str] = [],
         body_handlers: List[str] = [],
+        body_max_bytes: Union[int, None] = None,
         round_latency_decimals: int = 4,
         env_var_name: str = "ENABLE_METRICS",
         inprogress_name: str = "http_requests_inprogress",
@@ -99,6 +100,12 @@ class PrometheusFastApiInstrumentator:
                 Note that this has a noticeable negative impact on performance
                 with responses larger than a few MBs. Defaults to `[]`.
 
+            body_max_bytes (Union[int, None]): Maximum number of response body
+                bytes collected for handlers matching `body_handlers`. Once the
+                limit is reached, further chunks are dropped and the collected
+                body is marked as truncated. `None` means no limit. Defaults to
+                `None`.
+
             round_latency_decimals (int): Number of decimals latencies should be
                 rounded to. Ignored unless `should_round_latency_decimals` is
                 `True`. Defaults to `4`.
@@ -141,6 +148,7 @@ class PrometheusFastApiInstrumentator:
 
         self.excluded_handlers = [re.compile(path) for path in excluded_handlers]
         self.body_handlers = [re.compile(path) for path in body_handlers]
+        self.body_max_bytes = body_max_bytes
 
         self.instrumentations: List[Callable[[metrics.Info], None]] = []
         self.async_instrumentations: List[Callable[[metrics.Info], Awaitable[None]]] = []
@@ -236,6 +244,7 @@ class PrometheusFastApiInstrumentator:
             async_instrumentations=self.async_instrumentations,
             excluded_handlers=self.excluded_handlers,  # type: ignore
             body_handlers=self.body_handlers,  # type: ignore
+            body_max_bytes=self.body_max_bytes,
             metric_namespace=metric_namespace,
             metric_subsystem=metric_subsystem,
             should_only_respect_2xx_for_highr=should_only_respect_2xx_for_highr,
